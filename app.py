@@ -7,31 +7,57 @@ import matplotlib.pyplot as plt
 # ── 1) FIRST Streamlit command ─────────────────────────────────────────────────
 st.set_page_config(page_title="📈 7‑Day Rossmann Forecast", layout="wide")
 
-# ── 2) Load model once ─────────────────────────────────────────────────────────
+# ── 2) Load model & store metadata ──────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     return joblib.load("model.pkl")
 
-model = load_model()
+@st.cache_data
+def load_store_data():
+    return pd.read_csv("store.csv")
 
-# ── 3) Feature builder (single row) ────────────────────────────────────────────
-def make_features(row):
-    # Numeric
+model = load_model()
+store_df = load_store_data()
+
+# ── 3) Feature builder ──────────────────────────────────────────────────────────
+def make_features(store_id, date, promo, school_hol, state_hol):
+    # Pull store metadata
+    s = store_df.loc[store_df["Store"] == store_id].iloc[0]
+    # Compute promo2 months
+    if s.Promo2 == 1 and not pd.isna(s.Promo2SinceYear):
+        promo2_since = pd.Timestamp(year=int(s.Promo2SinceYear),
+                                    month=int(pd.to_datetime(f'{s.Promo2SinceWeek}-1', format='%W-%w').month),
+                                    day=1)
+        promo2_months = max(0, (date.year - promo2_since.year) * 12 + (date.month - promo2_since.month))
+        promo_in_month = int(date.strftime("%b") in str(s.PromoInterval).split(","))
+    else:
+        promo2_months = 0
+        promo_in_month = 0
+
+    # Months since competition
+    if not pd.isna(s.CompetitionOpenSinceYear):
+        comp_since = pd.Timestamp(year=int(s.CompetitionOpenSinceYear),
+                                  month=int(s.CompetitionOpenSinceMonth),
+                                  day=1)
+        comp_months = max(0, (date.year - comp_since.year) * 12 + (date.month - comp_since.month))
+    else:
+        comp_months = 0
+
+    # Base numeric features
     d = {
-        "Store": row["Store"],
-        "DayOfWeek": row["Date"].weekday() + 1,
-        "Day": row["Date"].day,
-        "Month": row["Date"].month,
-        "CompetitionDistance": row["CompetitionDistance"],
-        # months since competition opened
-        "CompetitionMonths": max(0, (row["Date"].year - row["CompYear"]) * 12 + (row["Date"].month - row["CompMonth"])),
-        "Promo": row["Promo"],
-        "Promo2": row["Promo2"],
-        "Promo2Months": max(0, (row["Date"].year - row["P2Year"]) * 12 + (row["Date"].month - row["P2Month"])),
-        "PromoInMonth": int(row["Date"].strftime("%b") in row["PromoIntervalList"])
+        "Store": store_id,
+        "DayOfWeek": date.weekday() + 1,
+        "Day": date.day,
+        "Month": date.month,
+        "CompetitionDistance": s.CompetitionDistance,
+        "CompetitionMonths": comp_months,
+        "Promo": promo,
+        "Promo2": s.Promo2,
+        "Promo2Months": promo2_months,
+        "PromoInMonth": promo_in_month,
     }
 
-    # One‑hots template
+    # One‑hot templates
     for col in (
         [f"StoreType_{x}" for x in ["a","b","c","d"]] +
         [f"Assortment_{x}" for x in ["a","b","c"]] +
@@ -40,129 +66,74 @@ def make_features(row):
     ):
         d[col] = 0
 
-    # Fill actual one‑hots
-    d[f"StoreType_{row['StoreType']}"]   = 1
-    d[f"Assortment_{row['Assortment']}"] = 1
-    d[f"StateHoliday_{row['StateHoliday']}"] = 1
-    d[f"SchoolHoliday_{row['SchoolHoliday']}"] = 1
+    # Fill one‑hots
+    d[f"StoreType_{s.StoreType}"]       = 1
+    d[f"Assortment_{s.Assortment}"]     = 1
+    d[f"StateHoliday_{state_hol}"]      = 1
+    d[f"SchoolHoliday_{school_hol}"]    = 1
 
     return pd.DataFrame([d])
 
-
-# ── 4) Sidebar inputs ─────────────────────────────────────────────────────────
-st.sidebar.header("Store & Promo Details")
-
-store = st.sidebar.number_input("Store ID", 1, 1115, value=1)
-store_type = st.sidebar.selectbox("Store Type", ["a","b","c","d"])
-assortment = st.sidebar.selectbox("Assortment", ["a","b","c"])
-competition_distance = st.sidebar.number_input("Competition Distance (m)", 0.0, 1e5, 5000.0, step=100.0)
-comp_month = st.sidebar.slider("Competition Open Since Month", 1, 12, 1)
-comp_year  = st.sidebar.number_input("Competition Open Since Year", 1900, pd.Timestamp.today().year, 2010)
-
-promo    = st.sidebar.selectbox("Promo (0/1)", [0,1])
-promo2   = st.sidebar.selectbox("Promo2 (0/1)", [0,1])
-p2_week  = st.sidebar.slider("Promo2 Since Week", 1, 52, 1)
-p2_year  = st.sidebar.number_input("Promo2 Since Year", 1900, pd.Timestamp.today().year, 2010)
-p_interval = st.sidebar.text_input("PromoInterval (e.g. Jan,Apr...)", "")
-
-# Precompute list for feature builder
-promo_interval_list = [m.strip() for m in p_interval.split(",") if m.strip()]
+# ── 4) Sidebar inputs ───────────────────────────────────────────────────────────
+st.sidebar.header("Store & Promo Info")
+store_id = st.sidebar.number_input("Store ID", min_value=1, max_value=1115, value=1, step=1)
+promo    = st.sidebar.selectbox("Is there a Promo today? (0 = No, 1 = Yes)", [0,1], index=1)
 
 st.sidebar.header("Forecast Settings")
 start_date = st.sidebar.date_input("Start Date", pd.Timestamp.today().date())
 
-# 7-day window
+# Build the next 7 days
 dates = pd.date_range(start_date, periods=7, freq="D")
 date_strs = [d.strftime("%Y-%m-%d") for d in dates]
 
-# Let user pick which of these dates are holidays
 school_hols = st.sidebar.multiselect(
-    "Select School Holiday Dates",
+    "Select which dates are School Holidays",
     options=date_strs
 )
 state_hols = st.sidebar.multiselect(
-    "Select State Holiday Dates",
+    "Select which dates are State Holidays",
     options=date_strs
 )
 
+# ── 5) Run Forecast ─────────────────────────────────────────────────────────────
 if st.sidebar.button("🔮 Run 7‑Day Forecast"):
-    # Build features for each date
+    # Build feature matrix
     feats = []
     for d in dates:
-        row = {
-            "Store": store,
-            "StoreType": store_type,
-            "Assortment": assortment,
-            "CompetitionDistance": competition_distance,
-            "CompMonth": comp_month,
-            "CompYear": comp_year,
-            "Promo": promo,
-            "Promo2": promo2,
-            "P2Month": pd.Timestamp.today().week if promo2 else 0,  # fallback if needed
-            "P2Week": p2_week,
-            "P2Year": p2_year,
-            "PromoIntervalList": promo_interval_list,
-            "Date": d,
-            # dynamically assign holiday flags
-            "StateHoliday": "b" if d.strftime("%Y-%m-%d") in state_hols else "0",
-            "SchoolHoliday": 1 if d.strftime("%Y-%m-%d") in school_hols else 0
-        }
-        feats.append(make_features(row))
-
+        feats.append(make_features(
+            store_id=store_id,
+            date=d,
+            promo=promo,
+            school_hol=1 if d.strftime("%Y-%m-%d") in school_hols else 0,
+            state_hol="b" if d.strftime("%Y-%m-%d") in state_hols else "0"
+        ))
     X = pd.concat(feats, ignore_index=True)
-    # … after you’ve built X (the full feature DataFrame for your 7‑day window) …
 
-# ── DEBUGGING: inspect feature alignment ───────────────────────────────────────
-st.write("🔍 **DEBUG: Feature matrix (first 5 rows):**")
-st.write(X.head())
-
-st.write("🔍 **DEBUG: Columns in feature matrix:**")
-st.write(list(X.columns))
-
-st.write("🔍 **DEBUG: Model expected feature names:**")
-st.write(list(model.feature_names_in_))
-
-# Show differences
-missing = list(set(model.feature_names_in_) - set(X.columns))
-extra   = list(set(X.columns) - set(model.feature_names_in_))
-st.write(f"❌ Missing columns that model expects: {missing}")
-st.write(f"➕ Extra columns not used by model:     {extra}")
-
-# ── DEBUGGING: inspect model itself ───────────────────────────────────────────
-st.write("🔍 **DEBUG: Loaded model parameters:**")
-st.json(model.get_params())
-
-# Now you’ll see exactly how your input lines up before prediction
-# preds = model.predict(X)
-# … rest of your code …
-
+    # Predict
     preds = model.predict(X)
 
-    # Display line chart
+    # Plot
     st.subheader(f"📈 7‑Day Sales Forecast from {start_date}")
-    chart_df = pd.DataFrame({
-        "Date": dates,
-        "Predicted Sales": preds
-    }).set_index("Date")
+    chart_df = pd.DataFrame({"Date": dates, "Predicted Sales": preds}).set_index("Date")
     st.line_chart(chart_df)
 
-    # ── Insights Panel ─────────────────────────────────────────────────────────
+    # Insights
     st.markdown("### 🔍 Insights")
-    max_day  = dates[preds.argmax()].strftime("%Y-%m-%d")
-    min_day  = dates[preds.argmin()].strftime("%Y-%m-%d")
-    avg_pred = preds.mean()
+    max_i = np.argmax(preds)
+    min_i = np.argmin(preds)
+    st.write(f"- **Highest** predicted sales: {preds[max_i]:,.0f} on **{dates[max_i].date()}**")
+    st.write(f"- **Lowest**  predicted sales: {preds[min_i]:,.0f} on **{dates[min_i].date()}**")
+    st.write(f"- **Average** predicted sales: {preds.mean():,.0f}")
 
-    st.write(f"- **Highest** predicted sales: {preds.max():,.0f} on **{max_day}**")
-    st.write(f"- **Lowest**  predicted sales: {preds.min():,.0f} on **{min_day}**")
-    st.write(f"- **Average** predicted sales over 7 days: {avg_pred:,.0f}")
-
-    # Simple trend analysis
     if preds[-1] > preds[0]:
         st.write("➡️ Overall trend: **Increasing** sales over the week.")
     elif preds[-1] < preds[0]:
         st.write("⬇️ Overall trend: **Decreasing** sales over the week.")
     else:
         st.write("🔁 Overall trend: **Flat** sales over the week.")
-
 else:
-    st.info("👈 Set parameters and click **Run 7‑Day Forecast**")
+    st.info("👈 Set your parameters and click **Run 7‑Day Forecast**")
+
+# ── 6) Footer ─────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.caption("Built with ❤️ using Streamlit & XGBoost — features mirror your training pipeline.")
