@@ -110,6 +110,32 @@ if st.sidebar.button("🔮 Run 7‑Day Forecast"):
         feats.append(make_features(row))
 
     X = pd.concat(feats, ignore_index=True)
+    # … after you’ve built X (the full feature DataFrame for your 7‑day window) …
+
+# ── DEBUGGING: inspect feature alignment ───────────────────────────────────────
+st.write("🔍 **DEBUG: Feature matrix (first 5 rows):**")
+st.write(X.head())
+
+st.write("🔍 **DEBUG: Columns in feature matrix:**")
+st.write(list(X.columns))
+
+st.write("🔍 **DEBUG: Model expected feature names:**")
+st.write(list(model.feature_names_in_))
+
+# Show differences
+missing = list(set(model.feature_names_in_) - set(X.columns))
+extra   = list(set(X.columns) - set(model.feature_names_in_))
+st.write(f"❌ Missing columns that model expects: {missing}")
+st.write(f"➕ Extra columns not used by model:     {extra}")
+
+# ── DEBUGGING: inspect model itself ───────────────────────────────────────────
+st.write("🔍 **DEBUG: Loaded model parameters:**")
+st.json(model.get_params())
+
+# Now you’ll see exactly how your input lines up before prediction
+# preds = model.predict(X)
+# … rest of your code …
+
     preds = model.predict(X)
 
     # Display line chart
