@@ -108,6 +108,30 @@ if st.sidebar.button("🔮 Run 7‑Day Forecast"):
             state_hol="b" if d.strftime("%Y-%m-%d") in state_hols else "0"
         ))
     X = pd.concat(feats, ignore_index=True)
+        # … after you build X (the feature DataFrame for all 7 days) …
+
+    # ── DEBUG: Inspect feature matrix ────────────────────────────────────────────
+    st.write("### 🔍 DEBUG: Feature matrix (first 7 rows)")
+    st.dataframe(X)  # show the full 7×N matrix
+
+    st.write("### 🔍 DEBUG: Columns in feature matrix")
+    st.write(sorted(X.columns.tolist()))
+
+    st.write("### 🔍 DEBUG: Model expected feature names")
+    st.write(sorted(model.feature_names_in_.tolist()))
+
+    missing = sorted(set(model.feature_names_in_) - set(X.columns))
+    extra   = sorted(set(X.columns) - set(model.feature_names_in_))
+    st.write(f"❌ Missing columns: {missing}")
+    st.write(f"➕ Extra columns:   {extra}")
+
+    # ── DEBUG: Example row values ───────────────────────────────────────────────
+    st.write("### 🔍 DEBUG: Example feature values for day 1")
+    st.json(X.iloc[0].to_dict())
+
+    # Now do prediction
+    preds = model.predict(X)
+
 
     # Predict
     preds = model.predict(X)
