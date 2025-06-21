@@ -61,21 +61,24 @@ def preprocess_data(df, scaler):
     )
     df.drop(['MonthName', 'PromoInterval'], axis=1, inplace=True)
 
-    # Select and reorder columns to match training data
-    cols = [
-        'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
-        'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
-        'StoreType', 'Assortment', 'StateHoliday', 'SchoolHoliday'
-    ]
-    df = df[cols]
+    # Select columns *before* one-hot encoding for scaling
+    # This list must match the 'numeric_cols' list used when fitting the scaler in your notebook
+    numeric_cols_for_scaling = ['Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
+                                'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth']
 
-    # One-hot encode categorical columns - make sure to handle potential missing categories
+    # Normalize numeric columns using the loaded scaler *before* one-hot encoding
+    # Ensure these columns are in the same order as they were during fitting
+    df[numeric_cols_for_scaling] = scaler.transform(df[numeric_cols_for_scaling])
+
+    # Define categorical columns
     categorical_cols = ['StoreType', 'Assortment', 'StateHoliday', 'SchoolHoliday']
+
+    # One-hot encode categorical columns
     df = pd.get_dummies(df, columns=categorical_cols, prefix=categorical_cols)
 
     # Ensure all columns from training data are present (add missing ones with 0)
-    # You would ideally save the list of columns from your training data
-    # For this example, we'll assume the following dummy columns exist based on your notebook
+    # This list must exactly match the columns of your X_train DataFrame after all preprocessing steps
+    # including scaling and one-hot encoding. Get this list from your notebook after creating X_train.
     expected_cols_after_dummies = [
         'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
         'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
@@ -92,16 +95,14 @@ def preprocess_data(df, scaler):
     df = df[expected_cols_after_dummies]
 
 
-    # Convert boolean to int and float to int for specific columns
-    bool_columns = df.select_dtypes(include=['bool']).columns
-    df[bool_columns] = df[bool_columns].astype(int)
+    # Convert boolean to int and float to int for specific columns (these were numeric before scaling)
+    # Ensure these columns are now treated as integers after scaling
     float_to_int_cols = ['Promo', 'Promo2', 'PromoInMonth']
-    df[float_to_int_cols] = df[float_to_int_cols].astype(int)
-
-    # Normalize numeric columns - need to apply the *same* scaler fitted on the training data
-    numeric_cols = ['Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
-                'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth'] # Exclude dummy columns and Sales
-    df[numeric_cols] = scaler.transform(df[numeric_cols])
+    # Need to re-evaluate if these should be int *after* scaling. Scaled values are typically floats.
+    # Let's keep them as float for now, as scaling transforms them to floats.
+    # If your model expects int, you might need to explicitly cast them after scaling.
+    # For XGBoost, float input is usually fine.
+    # df[float_to_int_cols] = df[float_to_int_cols].astype(int)
 
 
     return df
@@ -143,7 +144,7 @@ if github_repo_url:
             'Day': day,
             'Month': month,
             'Year': year,
-            'Open': 1, # Assuming the store is open for prediction
+            'Open': 1, # Assuming the store is open for prediction - Note: 'Open' was dropped in notebook
             'Promo': st.sidebar.selectbox("Promo", [0, 1]),
             'StateHoliday': st.sidebar.selectbox("State Holiday", ['0', 'a', 'b', 'c']),
             'SchoolHoliday': st.sidebar.selectbox("School Holiday", [0, 1]),
@@ -163,66 +164,57 @@ if github_repo_url:
         # Preprocess the input data
         processed_input_df = preprocess_data(input_df.copy(), scaler)
 
-        # Ensure column order and presence match the model's expected input
-        # This is a crucial step to avoid errors during prediction.
-        # You need the exact list of columns that the model was trained on after preprocessing and one-hot encoding.
-        # In your notebook, this would be the columns of your 'X' DataFrame.
-        # For now, we'll assume 'expected_cols_after_dummies' from the preprocess_data function
-        expected_model_cols = [
-            'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
-            'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
-            'StoreType_a', 'StoreType_b', 'StoreType_c', 'StoreType_d',
-            'Assortment_a', 'Assortment_b', 'Assortment_c',
-            'StateHoliday_0', 'StateHoliday_a', 'StateHoliday_b', 'StateHoliday_c',
-            'SchoolHoliday'
-        ] # This list must exactly match the order and names of columns in your training data X
-
-        # Add missing columns to processed_input_df with value 0
-        for col in expected_model_cols:
-            if col not in processed_input_df.columns:
-                processed_input_df[col] = 0
-
-        # Reorder the columns of processed_input_df
-        processed_input_df = processed_input_df[expected_model_cols]
-
-
         # Make prediction
         if st.sidebar.button("Predict Sales"):
             prediction = model.predict(processed_input_df)
-            # The scaler was applied to the target variable (Sales) as well in your notebook.
+
             # To get the actual sales value, we need to inverse transform the prediction.
             # The scaler was fitted on the whole dataframe including Sales.
             # We need to create a dummy DataFrame with the predicted sales in the 'Sales' column
             # and other columns with arbitrary values to use the inverse_transform method correctly.
-            # A more robust approach would be to save the scaler that was *only* fitted on the 'Sales' column.
-            # Given the current notebook, we'll recreate a structure similar to the DataFrame before splitting.
             # This is a workaround; a dedicated scaler for the target variable is recommended for deployment.
 
             # Create a dummy DataFrame with the correct column structure for inverse transformation
-            dummy_df_for_inverse = processed_input_df.copy() # Use the processed input features
-            dummy_df_for_inverse['Sales'] = prediction # Add the predicted sales
-            # Reorder columns to match the original DataFrame structure before scaling
-            original_cols_order = [
+            # This structure should match the DataFrame *before* splitting but *after* all preprocessing
+            # steps that were included when the scaler was fitted on the entire dataframe.
+            # Based on your notebook, the scaler was fitted on the entire 'df' after feature engineering
+            # but before splitting into X and y. The 'Sales' column was the last one.
+            original_cols_before_split_and_scale = [
                  'Store', 'StoreType_a', 'StoreType_b', 'StoreType_c', 'StoreType_d', 'Assortment_a', 'Assortment_b', 'Assortment_c',
                 'DayOfWeek', 'Day', 'Month',
                 'CompetitionDistance', 'CompetitionMonths',
                 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
                 'StateHoliday_0', 'StateHoliday_a', 'StateHoliday_b', 'StateHoliday_c',
-                'SchoolHoliday', 'Sales' # Include Sales at the end as it was in your original scaled df
+                'SchoolHoliday', 'Sales' # Sales was included here when scaling the whole df
             ]
-            # Ensure all original columns are present before reordering
-            for col in original_cols_order:
+
+            dummy_df_for_inverse = processed_input_df.copy()
+            # Need to add dummy columns that were present in the original df but not in the input for inverse transform
+            for col in original_cols_before_split_and_scale:
                 if col not in dummy_df_for_inverse.columns:
-                    dummy_df_for_inverse[col] = 0
+                    # Assign an arbitrary value for columns not present in the input,
+                    # as these are needed for the structure of inverse_transform
+                    # For dummy variables, 0 is appropriate. For others, a mean or median might be needed
+                    # but since the scaler was applied to the whole df, any value will be transformed.
+                    # A more robust solution would be a separate scaler for the target.
+                    dummy_df_for_inverse[col] = 0 # Or a more appropriate default/mean
 
-            dummy_df_for_inverse = dummy_df_for_inverse[original_cols_order]
+            # Add the predicted sales to the 'Sales' column
+            dummy_df_for_inverse['Sales'] = prediction
 
-            # Inverse transform the entire dummy DataFrame. The inverse transformed 'Sales' column is the actual prediction.
-            actual_prediction = scaler.inverse_transform(dummy_df_for_inverse)[:, original_cols_order.index('Sales')]
+            # Reorder columns to match the original DataFrame structure before scaling
+            dummy_df_for_inverse = dummy_df_for_inverse[original_cols_before_split_and_scale]
+
+
+            # Inverse transform the entire dummy DataFrame.
+            # The inverse transformed 'Sales' column is at the index corresponding to 'Sales'.
+            sales_col_index = original_cols_before_split_and_scale.index('Sales')
+            actual_prediction = scaler.inverse_transform(dummy_df_for_inverse)[:, sales_col_index]
 
 
             st.subheader("Predicted Sales:")
-            st.write(f"${actual_prediction[0]:,.2f}")
+            # Ensure the prediction is not negative
+            st.write(f"${max(0, actual_prediction[0]):,.2f}")
 
     else:
-        st.warning("Please enter a valid GitHub repository URL.")
+        st.warning("Please enter a valid GitHub repository URL and ensure files are accessible.")
