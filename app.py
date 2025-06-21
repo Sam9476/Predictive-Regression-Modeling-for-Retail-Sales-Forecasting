@@ -1,134 +1,228 @@
-# app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
 import joblib
-import matplotlib.pyplot as plt
+import numpy as np
 
-# ── 1) FIRST Streamlit command ─────────────────────────────────────────────────
-st.set_page_config(page_title="📈 7‑Day Rossmann Forecast", layout="wide")
-
-# ── 2) Load artifacts ────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_model():
-    return joblib.load("model.pkl")
-
-@st.cache_resource
-def load_scaler():
-    return joblib.load("scaler.pkl")
-
+# Function to load data from GitHub
 @st.cache_data
-def load_store_data():
-    return pd.read_csv("store.csv")
+def load_data(url):
+    """Loads data from a given URL (GitHub raw file link)."""
+    try:
+        df = pd.read_csv(url)
+        return df
+    except Exception as e:
+        st.error(f"Error loading data from {url}: {e}")
+        return None
 
-model  = load_model()
-scaler = load_scaler()
-store_df = load_store_data()
+# Function to load the trained model and scaler
+@st.cache_resource
+def load_model_and_scaler(model_url, scaler_url):
+    """Loads the pre-trained model and scaler from GitHub raw file links."""
+    try:
+        model = joblib.load(model_url)
+        scaler = joblib.load(scaler_url)
+        return model, scaler
+    except Exception as e:
+        st.error(f"Error loading model or scaler: {e}")
+        return None, None
 
-# ── 3) Define numeric columns ────────────────────────────────────────────────────
-numeric_cols = [
-    "Store", "DayOfWeek", "Day", "Month",
-    "CompetitionDistance", "CompetitionMonths",
-    "Promo", "Promo2", "Promo2Months", "PromoInMonth"
-]
+# Function to preprocess input data
+def preprocess_data(df, scaler):
+    """Preprocesses the input DataFrame."""
+    # Handle missing values in CompetitionDistance - using the same strategy as in the notebook
+    df['CompetitionDistance'].fillna(2*df['CompetitionDistance'].max(), inplace=True)
 
-# ── 4) Sidebar inputs ────────────────────────────────────────────────────────────
-st.sidebar.header("🛒 Store & Promo Settings")
-store_id   = st.sidebar.number_input("Store ID", 1, 1115, 1, 1)
-promo_flag = st.sidebar.selectbox("Promo today? (0=No,1=Yes)", [0,1], index=1)
+    # Handle CompetitionOpenSinceMonth and CompetitionOpenSinceYear
+    df['CompetitionOpenSinceYear'] = df['CompetitionOpenSinceYear'].fillna(0).astype(int)
+    df['CompetitionOpenSinceMonth'] = df['CompetitionOpenSinceMonth'].fillna(0).astype(int)
+    df['CompetitionMonths'] = 0
+    mask = (df['CompetitionOpenSinceYear'] > 0) & (df['CompetitionOpenSinceMonth'] > 0)
+    df.loc[mask, 'CompetitionMonths'] = 12 * (df.loc[mask, 'Year'] - df.loc[mask, 'CompetitionOpenSinceYear']) + (df.loc[mask, 'Month'] - df.loc[mask, 'CompetitionOpenSinceMonth'])
+    df.loc[df['CompetitionMonths'] < 0, 'CompetitionMonths'] = 0
+    df.drop(['CompetitionOpenSinceMonth', 'CompetitionOpenSinceYear'], axis=1, inplace=True)
 
-st.sidebar.header("📅 Forecast Settings")
-start_date = st.sidebar.date_input("Start Date", pd.Timestamp.today().date())
-dates = pd.date_range(start_date, periods=7, freq="D")
-date_strs = [d.strftime("%Y-%m-%d") for d in dates]
+    # Handle Promo2SinceWeek and Promo2SinceYear
+    df.loc[df['Promo2'] == 0, ['Promo2SinceWeek','Promo2SinceYear']] = 0
+    df['Promo2Months'] = 0
+    mask = (df['Promo2SinceYear'] > 0) & (df['Promo2SinceWeek'] > 0)
+    df.loc[mask, 'Promo2Months'] = 12 * (df.loc[mask, 'Year'] - df.loc[mask, 'Promo2SinceYear']) + (4 * (df.loc[mask, 'Month'] - (df.loc[mask, 'Promo2SinceWeek'] / 4.0)))
+    df.loc[df['Promo2Months'] < 0, 'Promo2Months'] = 0
+    df.drop(['Promo2SinceWeek', 'Promo2SinceYear'], axis=1, inplace=True)
 
-school_hols = st.sidebar.multiselect("School holiday dates", options=date_strs)
-state_hols  = st.sidebar.multiselect("State holiday dates", options=date_strs)
+    # Handle PromoInterval and PromoInMonth
+    df['PromoInMonth'] = 0
+    month_map = {1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr', 5:'May', 6:'Jun',
+                7:'Jul', 8:'Aug', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dec'}
+    df['MonthName'] = df['Month'].map(month_map)
+    mask = ~df['PromoInterval'].isna()
+    df.loc[mask, 'PromoInMonth'] = df.loc[mask].apply(
+        lambda x: 1 if x['MonthName'] in str(x['PromoInterval']).split(',') else 0,
+        axis=1
+    )
+    df.drop(['MonthName', 'PromoInterval'], axis=1, inplace=True)
 
-if not st.sidebar.button("🔮 Run 7‑Day Forecast"):
-    st.info("👈 Adjust settings and click **Run 7‑Day Forecast**")
-    st.stop()
+    # Select and reorder columns to match training data
+    cols = [
+        'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
+        'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
+        'StoreType', 'Assortment', 'StateHoliday', 'SchoolHoliday'
+    ]
+    df = df[cols]
 
-# ── 5) Feature builder ──────────────────────────────────────────────────────────
-def make_features(store_id, date, promo_flag, is_school_hol, is_state_hol):
-    s = store_df.loc[store_df.Store == store_id].iloc[0]
-    # Competition months
-    if pd.notna(s.CompetitionOpenSinceYear) and s.CompetitionOpenSinceYear>0:
-        comp_since = pd.Timestamp(int(s.CompetitionOpenSinceYear),
-                                  int(s.CompetitionOpenSinceMonth), 1)
-        comp_months = max(0, (date.year - comp_since.year)*12 + (date.month - comp_since.month))
+    # One-hot encode categorical columns - make sure to handle potential missing categories
+    categorical_cols = ['StoreType', 'Assortment', 'StateHoliday', 'SchoolHoliday']
+    df = pd.get_dummies(df, columns=categorical_cols, prefix=categorical_cols)
+
+    # Ensure all columns from training data are present (add missing ones with 0)
+    # You would ideally save the list of columns from your training data
+    # For this example, we'll assume the following dummy columns exist based on your notebook
+    expected_cols_after_dummies = [
+        'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
+        'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
+        'StoreType_a', 'StoreType_b', 'StoreType_c', 'StoreType_d',
+        'Assortment_a', 'Assortment_b', 'Assortment_c',
+        'StateHoliday_0', 'StateHoliday_a', 'StateHoliday_b', 'StateHoliday_c',
+        'SchoolHoliday'
+    ]
+    for col in expected_cols_after_dummies:
+        if col not in df.columns:
+            df[col] = 0
+
+    # Reorder columns to match the order used during training
+    df = df[expected_cols_after_dummies]
+
+
+    # Convert boolean to int and float to int for specific columns
+    bool_columns = df.select_dtypes(include=['bool']).columns
+    df[bool_columns] = df[bool_columns].astype(int)
+    float_to_int_cols = ['Promo', 'Promo2', 'PromoInMonth']
+    df[float_to_int_cols] = df[float_to_int_cols].astype(int)
+
+    # Normalize numeric columns - need to apply the *same* scaler fitted on the training data
+    numeric_cols = ['Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
+                'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth'] # Exclude dummy columns and Sales
+    df[numeric_cols] = scaler.transform(df[numeric_cols])
+
+
+    return df
+
+# Streamlit App
+st.title("Rossmann Store Sales Prediction")
+
+st.write("This app predicts daily sales for Rossmann stores using an XGBoost model.")
+
+# Get GitHub raw file URLs from user input or hardcode
+github_repo_url = st.text_input("Enter the base URL of your GitHub repository (e.g., https://raw.githubusercontent.com/username/repo_name/main/)", "")
+
+if github_repo_url:
+    store_data_url = f"{github_repo_url}/store.csv"
+    model_url = f"{github_repo_url}/model.pkl"
+    scaler_url = f"{github_repo_url}/scaler.pkl"
+
+    # Load data and model
+    store_df = load_data(store_data_url)
+    model, scaler = load_model_and_scaler(model_url, scaler_url)
+
+    if store_df is not None and model is not None and scaler is not None:
+        st.sidebar.header("Input Features")
+
+        # Get user input for prediction
+        store_id = st.sidebar.selectbox("Store ID", store_df['Store'].unique())
+        day_of_week = st.sidebar.selectbox("Day of Week", range(1, 8))
+        day = st.sidebar.slider("Day of Month", 1, 31)
+        month = st.sidebar.slider("Month", 1, 12)
+        year = st.sidebar.slider("Year", 2013, 2015) # Assuming prediction for years within the training range
+
+        # Retrieve store-specific features
+        store_features = store_df[store_df['Store'] == store_id].iloc[0].to_dict()
+
+        # Create a DataFrame for prediction
+        input_data = {
+            'Store': store_id,
+            'DayOfWeek': day_of_week,
+            'Day': day,
+            'Month': month,
+            'Year': year,
+            'Open': 1, # Assuming the store is open for prediction
+            'Promo': st.sidebar.selectbox("Promo", [0, 1]),
+            'StateHoliday': st.sidebar.selectbox("State Holiday", ['0', 'a', 'b', 'c']),
+            'SchoolHoliday': st.sidebar.selectbox("School Holiday", [0, 1]),
+            'StoreType': store_features['StoreType'],
+            'Assortment': store_features['Assortment'],
+            'CompetitionDistance': store_features['CompetitionDistance'],
+            'CompetitionOpenSinceMonth': store_features['CompetitionOpenSinceMonth'],
+            'CompetitionOpenSinceYear': store_features['CompetitionOpenSinceYear'],
+            'Promo2': store_features['Promo2'],
+            'Promo2SinceWeek': store_features['Promo2SinceWeek'],
+            'Promo2SinceYear': store_features['Promo2SinceYear'],
+            'PromoInterval': store_features['PromoInterval']
+        }
+
+        input_df = pd.DataFrame([input_data])
+
+        # Preprocess the input data
+        processed_input_df = preprocess_data(input_df.copy(), scaler)
+
+        # Ensure column order and presence match the model's expected input
+        # This is a crucial step to avoid errors during prediction.
+        # You need the exact list of columns that the model was trained on after preprocessing and one-hot encoding.
+        # In your notebook, this would be the columns of your 'X' DataFrame.
+        # For now, we'll assume 'expected_cols_after_dummies' from the preprocess_data function
+        expected_model_cols = [
+            'Store', 'DayOfWeek', 'Day', 'Month', 'CompetitionDistance',
+            'CompetitionMonths', 'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
+            'StoreType_a', 'StoreType_b', 'StoreType_c', 'StoreType_d',
+            'Assortment_a', 'Assortment_b', 'Assortment_c',
+            'StateHoliday_0', 'StateHoliday_a', 'StateHoliday_b', 'StateHoliday_c',
+            'SchoolHoliday'
+        ] # This list must exactly match the order and names of columns in your training data X
+
+        # Add missing columns to processed_input_df with value 0
+        for col in expected_model_cols:
+            if col not in processed_input_df.columns:
+                processed_input_df[col] = 0
+
+        # Reorder the columns of processed_input_df
+        processed_input_df = processed_input_df[expected_model_cols]
+
+
+        # Make prediction
+        if st.sidebar.button("Predict Sales"):
+            prediction = model.predict(processed_input_df)
+            # The scaler was applied to the target variable (Sales) as well in your notebook.
+            # To get the actual sales value, we need to inverse transform the prediction.
+            # The scaler was fitted on the whole dataframe including Sales.
+            # We need to create a dummy DataFrame with the predicted sales in the 'Sales' column
+            # and other columns with arbitrary values to use the inverse_transform method correctly.
+            # A more robust approach would be to save the scaler that was *only* fitted on the 'Sales' column.
+            # Given the current notebook, we'll recreate a structure similar to the DataFrame before splitting.
+            # This is a workaround; a dedicated scaler for the target variable is recommended for deployment.
+
+            # Create a dummy DataFrame with the correct column structure for inverse transformation
+            dummy_df_for_inverse = processed_input_df.copy() # Use the processed input features
+            dummy_df_for_inverse['Sales'] = prediction # Add the predicted sales
+            # Reorder columns to match the original DataFrame structure before scaling
+            original_cols_order = [
+                 'Store', 'StoreType_a', 'StoreType_b', 'StoreType_c', 'StoreType_d', 'Assortment_a', 'Assortment_b', 'Assortment_c',
+                'DayOfWeek', 'Day', 'Month',
+                'CompetitionDistance', 'CompetitionMonths',
+                'Promo', 'Promo2', 'Promo2Months', 'PromoInMonth',
+                'StateHoliday_0', 'StateHoliday_a', 'StateHoliday_b', 'StateHoliday_c',
+                'SchoolHoliday', 'Sales' # Include Sales at the end as it was in your original scaled df
+            ]
+            # Ensure all original columns are present before reordering
+            for col in original_cols_order:
+                if col not in dummy_df_for_inverse.columns:
+                    dummy_df_for_inverse[col] = 0
+
+            dummy_df_for_inverse = dummy_df_for_inverse[original_cols_order]
+
+            # Inverse transform the entire dummy DataFrame. The inverse transformed 'Sales' column is the actual prediction.
+            actual_prediction = scaler.inverse_transform(dummy_df_for_inverse)[:, original_cols_order.index('Sales')]
+
+
+            st.subheader("Predicted Sales:")
+            st.write(f"${actual_prediction[0]:,.2f}")
+
     else:
-        comp_months = 0
-
-    # Promo2 months & in-month
-    if s.Promo2==1 and pd.notna(s.Promo2SinceYear) and s.Promo2SinceYear>0:
-        p2_since = pd.Timestamp.fromisocalendar(int(s.Promo2SinceYear),
-                                                 int(s.Promo2SinceWeek), 1)
-        p2_months = max(0, (date.year - p2_since.year)*12 + (date.month - p2_since.month))
-        interval = str(s.PromoInterval).split(",") if pd.notna(s.PromoInterval) else []
-        p_in_month = int(date.strftime("%b") in interval)
-    else:
-        p2_months = 0
-        p_in_month = 0
-
-    # Raw numeric features
-    raw = {
-        "Store": store_id,
-        "DayOfWeek": date.weekday()+1,
-        "Day": date.day,
-        "Month": date.month,
-        "CompetitionDistance": s.CompetitionDistance,
-        "CompetitionMonths": comp_months,
-        "Promo": promo_flag,
-        "Promo2": s.Promo2,
-        "Promo2Months": p2_months,
-        "PromoInMonth": p_in_month,
-    }
-
-    # Build, scale, and reconstruct numeric DataFrame
-    num_arr = np.array([raw[col] for col in numeric_cols]).reshape(1, -1)
-    scaled_arr = scaler.transform(num_arr)  # bypasses feature_names_ check
-    num_scaled = pd.DataFrame(scaled_arr, columns=numeric_cols)
-
-    # One-hot categorical
-    cats = {}
-    for col, vals in [
-        ("StoreType", ["a","b","c","d"]),
-        ("Assortment", ["a","b","c"]),
-        ("StateHoliday", ["0","a","b","c"]),
-        ("SchoolHoliday", [0,1]),
-    ]:
-        for v in vals:
-            cats[f"{col}_{v}"] = 0
-    cats[f"StoreType_{s.StoreType}"] = 1
-    cats[f"Assortment_{s.Assortment}"] = 1
-    cats[f"StateHoliday_{('b' if date.strftime('%Y-%m-%d') in state_hols else '0')}"] = 1
-    cats[f"SchoolHoliday_{(1 if date.strftime('%Y-%m-%d') in school_hols else 0)}"] = 1
-
-    return pd.concat([num_scaled, pd.DataFrame([cats])], axis=1)
-
-# ── 6) Build feature matrix for all 7 days ────────────────────────────────────
-feature_list = [make_features(store_id, d, promo_flag,
-                              d.strftime("%Y-%m-%d") in school_hols,
-                              d.strftime("%Y-%m-%d") in state_hols)
-                for d in dates]
-X = pd.concat(feature_list, ignore_index=True)
-
-# ── 7) Predict & display ───────────────────────────────────────────────────────
-preds = model.predict(X)
-sales_preds = preds  # if your model outputs raw Sales; apply inverse-transform here if needed
-
-# Chart
-st.subheader(f"📈 7‑Day Sales Forecast from {start_date}")
-df_chart = pd.DataFrame({"Date": dates, "Predicted Sales": sales_preds}).set_index("Date")
-st.line_chart(df_chart)
-
-# Insights
-st.markdown("### 🔍 Insights")
-i_max = int(np.argmax(sales_preds))
-i_min = int(np.argmin(sales_preds))
-st.write(f"- **Highest** sales: {sales_preds[i_max]:,.0f} on {dates[i_max].date()}")
-st.write(f"- **Lowest**  sales: {sales_preds[i_min]:,.0f} on {dates[i_min].date()}")
-st.write(f"- **Average** sales: {sales_preds.mean():,.0f}")
-trend = "Increasing ↗️" if sales_preds[-1]>sales_preds[0] else "Decreasing ↘️" if sales_preds[-1]<sales_preds[0] else "Flat ↔️"
-st.write(f"- **Trend** over week: {trend}")
+        st.warning("Please enter a valid GitHub repository URL.")
