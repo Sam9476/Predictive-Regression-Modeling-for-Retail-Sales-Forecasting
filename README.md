@@ -37,24 +37,6 @@ An interactive Streamlit application for forecasting daily sales at Rossmann sto
 
 ---
 
-## ⚙️ Installation
-
-1. **Clone the repo**  
-   ```bash
-   git clone https://github.com/your-username/rossmann-sales-forecast.git
-   cd rossmann-sales-forecast
-   ```
-
-2. **Install dependencies**  
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Verify artifacts**  
-   Ensure `model.pkl`, `scaler.pkl`, and `store.csv` are present in the project root.
-
----
-
 ## ▶️ Usage
 
 Run the Streamlit app locally:
