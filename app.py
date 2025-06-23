@@ -24,7 +24,7 @@ model    = load_model()
 scaler   = load_scaler()
 store_df = load_store_data()
 
-# 3) Define feature columns
+# 3) Feature columns
 numeric_cols = [
     "Store","DayOfWeek","Day","Month",
     "CompetitionDistance","CompetitionMonths",
@@ -113,17 +113,22 @@ def make_features(date):
 X      = pd.concat([make_features(d) for d in dates], ignore_index=True)
 y_pred = model.predict(X)
 
-# 7) Matplotlib line chart with labels
+# 7) Transparent Matplotlib line chart
 st.subheader(f"Sales Forecast from {start_date.strftime('%d-%m-%Y')} to {dates[-1].strftime('%d-%m-%Y')}")
-fig, ax = plt.subplots(figsize=(8,4), facecolor="none")
-ax.plot(dates, y_pred, marker="o", linewidth=2)
-ax.set_title("7-Day Sales Forecast", fontsize=14)
-ax.set_xlabel("Date", fontsize=12)
-ax.set_ylabel("Predicted Sales ($)", fontsize=12)
+fig, ax = plt.subplots(figsize=(8,4))
+# make backgrounds transparent
+fig.patch.set_alpha(0)
+ax.patch.set_alpha(0)
+# plot line
+ax.plot(dates, y_pred, marker="o", linewidth=2, color="cyan")
+ax.set_title("7-Day Sales Forecast", color="white", fontsize=14)
+ax.set_xlabel("Date", color="white", fontsize=12)
+ax.set_ylabel("Predicted Sales ($)", color="white", fontsize=12)
+# ticks & labels color
+ax.tick_params(axis="x", colors="white", rotation=45)
+ax.tick_params(axis="y", colors="white")
 ax.xaxis.set_major_formatter(DateFormatter("%d-%m-%Y"))
-plt.xticks(rotation=45, ha="right")
-plt.grid(alpha=0.3)
-fig.patch.set_alpha(0)  # transparent background
+ax.grid(alpha=0.3, color="gray")
 st.pyplot(fig, clear_figure=True)
 
 # 8) Insights
