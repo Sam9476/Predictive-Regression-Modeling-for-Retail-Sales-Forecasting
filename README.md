@@ -29,8 +29,8 @@ An interactive Streamlit application for forecasting daily sales at Rossmann sto
 ## 📁 Repository Structure
 /predictive-regression-modeling-for-retail-sales-forecasting
 - ├── app.py # Streamlit dashboard application
-  ├── model.pkl # Trained XGBoost model artifact
-  ├── scaler.pkl # Fitted MinMaxScaler for numeric features
+- ├── model.pkl # Trained XGBoost model artifact
+- ├── scaler.pkl # Fitted MinMaxScaler for numeric features
 - ├── store.csv # Store metadata (type, assortment, competition, promotions)
 - ├── requirements.txt # Python dependencies
 - └── README.md # This documentation
