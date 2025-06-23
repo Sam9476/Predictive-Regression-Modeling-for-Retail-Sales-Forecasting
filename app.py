@@ -113,21 +113,38 @@ def make_features(date):
 X      = pd.concat([make_features(d) for d in dates], ignore_index=True)
 y_pred = model.predict(X)
 
-# 7) Transparent Matplotlib line chart
+# ── 7) Transparent Matplotlib line chart with custom y-axis ────────────────────
 st.subheader(f"Sales Forecast from {start_date.strftime('%d-%m-%Y')} to {dates[-1].strftime('%d-%m-%Y')}")
+
+# Compute buffers
+min_pred = y_pred.min()
+max_pred = y_pred.max()
+y_min = max(0, min_pred - 5000)      # start 5k below lowest, but not below zero
+y_max = max_pred + 3000             # end 3k above highest
+
 fig, ax = plt.subplots(figsize=(8,4))
-# make backgrounds transparent
 fig.patch.set_alpha(0)
 ax.patch.set_alpha(0)
-# plot line
+
+# Plot the line
 ax.plot(dates, y_pred, marker="o", linewidth=2, color="cyan")
+
+# Labels and title
 ax.set_title("7-Day Sales Forecast", color="white", fontsize=14)
 ax.set_xlabel("Date", color="white", fontsize=12)
 ax.set_ylabel("Predicted Sales ($)", color="white", fontsize=12)
-# ticks & labels color
-ax.tick_params(axis="x", colors="white", rotation=45)
-ax.tick_params(axis="y", colors="white")
+
+# X-axis formatting
 ax.xaxis.set_major_formatter(DateFormatter("%d-%m-%Y"))
+plt.setp(ax.get_xticklabels(), rotation=45, ha="right", color="white")
+
+# Y-axis limits and ticks every 1000
+ax.set_ylim(y_min, y_max)
+from matplotlib.ticker import MultipleLocator
+ax.yaxis.set_major_locator(MultipleLocator(1000))
+ax.tick_params(axis="y", colors="white")
+
+# Grid
 ax.grid(alpha=0.3, color="gray")
 st.pyplot(fig, clear_figure=True)
 
